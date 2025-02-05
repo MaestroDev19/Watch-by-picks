@@ -59,22 +59,19 @@ function shouldRetrieve(state: typeof GraphState.State): string {
   const lastMessage = messages[messages.length - 1];
 
   // Check if the last message contains a timeout error message
-  if (
-    typeof lastMessage.content === "string" &&
-    lastMessage.content.includes("canceling statement due to statement timeout")
-  ) {
-    console.log("---TIMEOUT ERROR DETECTED: SWITCHING TO SEARCH TOOL---");
-    return "search"; // Switch to the search tool
-  }
 
   // Otherwise, if a tool call is present, we assume retrieval is valid
   if (
     "tool_calls" in lastMessage &&
     Array.isArray(lastMessage.tool_calls) &&
-    lastMessage.tool_calls.length > 0
+    lastMessage.tool_calls.length > 0 &&
+    lastMessage.tool_calls.includes("retrieve")
   ) {
     console.log("---DECISION: RETRIEVE---");
     return "retrieve";
+  } else {
+    console.log("---DECISION: SEARCH---");
+    return "search";
   }
 
   // Default edge (if none of the above conditions are met)
@@ -158,9 +155,8 @@ async function gradeRecommendation(
         {context}
 
         Please analyze the documents and provide:
-        1. A relevance score between 0 and 1 where:
+        1. A relevance score either 0 and 1 where:
            - 0 = Not relevant at all
-           - 0.5 = Somewhat relevant
            - 1 = Highly relevant
         2. A brief explanation of why you gave this score
 
@@ -211,7 +207,7 @@ function checkRelevance(state: typeof GraphState.State): string {
     throw new Error("Expected relevanceScore to be a number.");
   }
 
-  if (relevanceScore >= threshold) {
+  if (relevanceScore === 1) {
     console.log("---DECISION: DOCS RELEVANT---");
     return "yes";
   }
