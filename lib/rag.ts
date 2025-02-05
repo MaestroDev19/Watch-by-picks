@@ -15,26 +15,13 @@ import { pull } from "langchain/hub";
 import { z } from "zod";
 import { ChatPromptTemplate } from "@langchain/core/prompts";
 import { AIMessage, BaseMessage, HumanMessage } from "@langchain/core/messages";
-const supabaseClient = createBrowserClient();
+
 const model = new ChatGoogleGenerativeAI({
   apiKey: process.env.NEXT_PUBLIC_GOOGLE_AI_KEY,
   model: "gemini-2.0-flash-exp",
   temperature: 0,
   maxOutputTokens: 2025,
 });
-
-const embeddings = new GoogleGenerativeAIEmbeddings({
-  apiKey: process.env.NEXT_PUBLIC_GOOGLE_AI_KEY,
-  model: "text-embedding-004",
-});
-
-const vectorStore = new SupabaseVectorStore(embeddings, {
-  client: supabaseClient,
-  tableName: "documents",
-  queryName: "match_documents",
-});
-
-const retriever = vectorStore.asRetriever();
 
 const GraphState = Annotation.Root({
   messages: Annotation<BaseMessage[]>({
@@ -44,37 +31,26 @@ const GraphState = Annotation.Root({
 });
 
 const tool = [
-  createRetrieverTool(retriever, {
-    name: "retrieve_tv_shows",
-    description:
-      "Retrieves relevant TV show information from the database based on user queries. Useful for finding details about specific shows, episodes, or related content. Recommendation: Consider adding filters for genre,  and rating to improve search precision.",
+  new TavilySearchResults({
+    maxResults: 5,
+    apiKey: process.env.NEXT_PUBLIC_SEARCH_KEY,
   }),
 ];
 
-const retrieveToolNode = new ToolNode<typeof GraphState.State>(tool);
+const searchToolNode = new ToolNode<typeof GraphState.State>(tool);
 
 function shouldRetrieve(state: typeof GraphState.State): string {
   const { messages } = state;
-  console.log("---DECIDE TO RETRIEVE---");
+  console.log("---DECIDE TO SEARCH---");
   const lastMessage = messages[messages.length - 1];
-
-  // Check if the last message contains a timeout error message
-
-  // Otherwise, if a tool call is present, we assume retrieval is valid
   if (
     "tool_calls" in lastMessage &&
     Array.isArray(lastMessage.tool_calls) &&
-    lastMessage.tool_calls.length > 0 &&
-    lastMessage.tool_calls.includes("retrieve")
+    lastMessage.tool_calls.length > 0
   ) {
-    console.log("---DECISION: RETRIEVE---");
-    return "retrieve";
-  } else {
     console.log("---DECISION: SEARCH---");
     return "search";
   }
-
-  // Default edge (if none of the above conditions are met)
   return END;
 }
 
@@ -99,19 +75,11 @@ async function search(
        - Release year/time period
        - Popularity and ratings
        - Cultural significance
-    3. Provide a detailed relevance score (0-100) with justification
-
-    Scoring Guidelines:
-    - 90-100: Perfect match, directly answers the query
-    - 70-89: Strong match, covers most aspects
-    - 50-69: Partial match, some relevant information
-    - 30-49: Weak match, limited relevance
-    - 0-29: No meaningful connection
-
+   
     User's Request:
     {question}
 
-  return  5 shows within 100-70
+ 
 `);
   const search = model.bindTools([tool], { tool_choice: tool.name });
   const chain = prompt.pipe(search);
@@ -130,23 +98,29 @@ async function gradeRecommendation(
   const tool = {
     name: "give_relevance_score",
     description:
-      "Evaluate the retrieved documents to determine how well they support the user's recommendation request. Return a numerical relevance score between 0 (not relevant) and 1 (highly relevant), and optionally include an explanation for the score.",
+      "Evaluate the retrieved documents to determine how well they support the user's recommendation request. Return a detailed relevance score between 0 (no meaningful connection) and 100 (perfect match) with justification. Use these scoring guidelines: 90-100 = Perfect match, directly answers query; 70-89 = Strong match, covers most aspects; 50-69 = Partial match, some relevant information; 30-49 = Weak match, limited relevance; 0-29 = No meaningful connection.",
     schema: z.object({
       relevanceScore: z
         .number()
         .min(0)
-        .max(1)
+        .max(100)
         .describe(
-          "A numerical score between 0 and 1 indicating document relevance."
+          "A detailed relevance score between 0 and 100 indicating how well the document matches the query. " +
+            "Scoring Guidelines: " +
+            "90-100 = Perfect match, directly answers query; " +
+            "70-89 = Strong match, covers most aspects; " +
+            "50-69 = Partial match, some relevant information; " +
+            "30-49 = Weak match, limited relevance; " +
+            "0-29 = No meaningful connection"
         ),
       explanation: z
         .string()
         .optional()
-        .describe("An optional explanation for the relevance score."),
+        .describe("A single sentence justification for the relevance score,"),
     }),
   };
   const prompt = ChatPromptTemplate.fromTemplate(`
-        You are an expert TV show recommendation assistant. Your task is to evaluate how relevant the retrieved documents are to the user's request and provide a relevance score.
+        You are an expert TV show recommendation assistant. Your task is to evaluate how relevant the retrieved documents are to the user's request and provide a detailed relevance score with justification.
 
         Here's the user's request:
         {question}
@@ -155,20 +129,24 @@ async function gradeRecommendation(
         {context}
 
         Please analyze the documents and provide:
-        1. A relevance score either 0 and 1 where:
-           - 0 = Not relevant at all
-           - 1 = Highly relevant
-        2. A brief explanation of why you gave this score
+        1. A detailed relevance score between 0 and 100 using these guidelines:
+           - 90-100: Perfect match, directly answers the query
+           - 70-89: Strong match, covers most aspects
+           - 50-69: Partial match, some relevant information
+           - 30-49: Weak match, limited relevance
+           - 0-29: No meaningful connection
+        2. A clear justification explaining why you gave this score
 
         Consider these factors in your evaluation:
         - Does the document contain information directly related to the user's query?
         - Is the information up-to-date and accurate?
         - Does the document provide sufficient detail to be helpful?
         - Are there multiple documents that support the same recommendation?
+        - How well does the document align with the user's preferences and requirements?
 
         Return your response in JSON format with these fields:
-        - relevanceScore: number
-        - explanation: string`);
+        - relevanceScore: number (0-100)
+        - explanation: string (single sentence justification for the score`);
 
   const relavance = model.bindTools([tool], { tool_choice: tool.name });
   const chain = prompt.pipe(relavance);
@@ -201,18 +179,23 @@ function checkRelevance(state: typeof GraphState.State): string {
 
   // Extract the relevanceScore from the tool call arguments
   const relevanceScore = toolCalls[0].args.relevanceScore;
-  const threshold = 0.4; // Adjust threshold as needed
-  console.log(relevanceScore);
+  console.log(`Relevance Score: ${relevanceScore}`);
+
   if (typeof relevanceScore !== "number") {
     throw new Error("Expected relevanceScore to be a number.");
   }
 
-  if (relevanceScore === 1) {
-    console.log("---DECISION: DOCS RELEVANT---");
+  // Use the scoring guidelines to determine relevance
+  if (relevanceScore >= 70) {
+    console.log("---DECISION: DOCS RELEVANT (Strong/Perfect Match)---");
     return "yes";
+  } else if (relevanceScore >= 50) {
+    console.log("---DECISION: DOCS PARTIALLY RELEVANT (Partial Match)---");
+    return "no"; // Consider refining search even for partial matches
+  } else {
+    console.log("---DECISION: DOCS NOT RELEVANT (Weak/No Match)---");
+    return "no";
   }
-  console.log("---DECISION: DOCS NOT RELEVANT---");
-  return "no";
 }
 
 async function agent(
@@ -222,8 +205,6 @@ async function agent(
 
   const { messages } = state;
 
-  // Remove any messages that contain the "give_relevance_score" tool call,
-  // since the agent does not need to see the graded relevance score.
   const filteredMessages = messages.filter((message) => {
     if (
       "tool_calls" in message &&
@@ -234,6 +215,10 @@ async function agent(
     }
     return true;
   });
+  const tool = new TavilySearchResults({
+    maxResults: 5,
+    apiKey: process.env.NEXT_PUBLIC_SEARCH_KEY,
+  });
 
   // Bind the tools (both internal retriever and external search) to the model.
   const agentModel = new ChatGoogleGenerativeAI({
@@ -242,7 +227,7 @@ async function agent(
     temperature: 0,
     maxOutputTokens: 2025,
     streaming: true,
-  }).bindTools(tool);
+  }).bindTools([tool]);
 
   try {
     // Invoke the agent model with the filtered conversation history.
@@ -354,20 +339,15 @@ async function generate(
 
 const workflow = new StateGraph(GraphState)
   .addNode("agent", agent)
-  .addNode("retrieve", retrieveToolNode)
-  .addNode("search", search)
+  .addNode("search", searchToolNode)
   .addNode("gradeRecommendation", gradeRecommendation)
   .addNode("rewrite", rewrite)
   .addNode("generate", generate);
 
 workflow.addEdge(START, "agent");
 
-workflow.addConditionalEdges("agent", shouldRetrieve, {
-  retrieve: "retrieve",
-  search: "search",
-});
+workflow.addConditionalEdges("agent", shouldRetrieve);
 
-workflow.addEdge("retrieve", "gradeRecommendation");
 workflow.addEdge("search", "gradeRecommendation");
 
 workflow.addConditionalEdges("gradeRecommendation", checkRelevance, {
@@ -375,8 +355,7 @@ workflow.addConditionalEdges("gradeRecommendation", checkRelevance, {
   no: "rewrite", // Documents need refinement
 });
 
-workflow.addEdge("rewrite", "search");
-workflow.addEdge("search", "generate");
+workflow.addEdge("rewrite", "agent");
 workflow.addEdge("generate", END);
 
 const app = workflow.compile();
