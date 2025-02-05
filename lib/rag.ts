@@ -368,6 +368,8 @@ workflow.addConditionalEdges("agent", shouldRetrieve, {
 });
 
 workflow.addEdge("retrieve", "gradeRecommendation");
+workflow.addEdge("search", "gradeRecommendation");
+
 workflow.addConditionalEdges("gradeRecommendation", checkRelevance, {
   yes: "generate", // Documents are relevant
   no: "rewrite", // Documents need refinement
