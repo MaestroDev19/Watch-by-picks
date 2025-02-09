@@ -18,7 +18,8 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Loader2 } from "lucide-react";
 
 // Import the picks function from your LangGraph workflow module.
-import { picks } from "@/lib/rag"; // adjust the path as needed
+import { watch } from "@/lib/agent"; // adjust the path as needed
+import { json } from "stream/consumers";
 
 // Define the form schema.
 const formSchema = z.object({
@@ -47,20 +48,28 @@ export default function TVShowRecommenderRAGHITL() {
     setLoading(true);
     setError(null);
     setRecommendation(null);
+    const extractContent = (jsonResponse: unknown) => {
+      const parsedResponse =
+        typeof jsonResponse === "string"
+          ? JSON.parse(jsonResponse)
+          : jsonResponse;
 
+      return parsedResponse.messages[0].kwargs.content;
+    };
     try {
-      // Call picks() and await its result.
-      const finalState: any = await picks(values.showPreferences);
-      if (finalState) {
-        const raw = JSON.parse(finalState); // Debugging: Check the full structure
-        const recommendationContent = raw.messages[0].kwargs.content;
-        ("No recommendation received.");
-        setRecommendation(recommendationContent);
+      console.log(values.showPreferences);
+      const res = await watch(values.showPreferences);
+      console.log(res);
+      const rec = JSON.parse(res);
+      console.log(rec);
+      if (res) {
+        const recommendation = extractContent(res);
+        setRecommendation(recommendation);
       } else {
         setRecommendation("No recommendation received.");
       }
+
       form.reset();
-      // Otherwise, check if it has a "messages" property.
     } catch (err: any) {
       console.error("Error in picks:", err);
       setError(
